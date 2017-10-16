@@ -34,7 +34,7 @@ class MSCPSlaveSerial
 		byte			_manualReplyLength;
 		unsigned long	_manualReplyOriginalMsgID;
 		byte			_manualReplyState;
-		unsigned long	_replyNeededCount;
+		uint8_t			_replyNeededCount;
 
 		// kapcsolat specifikus
 		byte			_connectionState;

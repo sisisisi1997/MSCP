@@ -215,13 +215,14 @@ bool MSCPSlaveSerial::receive(byte** start, byte* length)
 			case 4: // poll csomag [master --> slave] irányban
 				tLength = 2 + (_longMsgID ? 4 : 1);
 				break;
+			case 5:
+				tLength = 2;
 		}
 
 		// beállítjuk a fogadáshoz szükséges változók értékét
 				tLength		-= 1; // a csomag azonosító byte is benne volt ebben...
 				fullLength	= tLength; // eltároljuk a csomagazonosító nélküli hosszot
-		byte*	package		= (byte*)malloc(tLength - (first == 1 ? 3 : 0));
-	//	byte	pkgLength	= tLength;
+		byte*	package		= (byte*)malloc(tLength);
 		byte	received	= 0;
 		if(first == 1) // üdvözlő csomag
 		{
@@ -259,19 +260,19 @@ bool MSCPSlaveSerial::receive(byte** start, byte* length)
 		switch(first)
 		{
 			case 0: // standard csomag
-				slaveNodePos = _longMsgID ? 4 : 0;
+				slaveNodePos = _longMsgID ? 4 : 1;
 				break;
 			case 1: // üdvözlő csomag
 				slaveNodePos = 3;
 				break;
 			case 2: // kapcsolatbontó csomag
-				slaveNodePos = 1;
+				slaveNodePos = 0;
 				break;
 			case 3: // kapcsolatfenntartó csomag
-				slaveNodePos = 1;
+				slaveNodePos = 0;
 				break;
 			case 4: // poll csomag
-				slaveNodePos = 1;
+				slaveNodePos = 0;
 				break;
 		}
 		
@@ -280,7 +281,6 @@ bool MSCPSlaveSerial::receive(byte** start, byte* length)
 		
 		// beállítjuk az üzenet fogadásának idejét, hogy a kapcsolatállapotot megállapíthassuk vele
 		_lastMessageTime = millis(); // beállítjuk, hogy most kaptunk üzenetet utoljára
-		_connectionState = MSCPCommonSerial::CONN_STATE_CONNECTED;
 
 		// elküldjük az üzenetre az automatikus választ (autoACK)
 		byte reply[2];
@@ -292,20 +292,14 @@ bool MSCPSlaveSerial::receive(byte** start, byte* length)
 		
 		// felodolgozzuk az üzenetet
 		// kapcsolatfenntartó csomag esetén nincs teendő a switchben
-		// ACK csomagot nem kapunk, csak mi küldünk
 		switch(first)
 		{
 			case 0: // standard csomag
 				*start	= package;
 				*length	= fullLength;
 				if(_manualReplyState == MSCPCommonSerial::REPLY_STATE_NO_ORIGINAL)
-				{
 					_manualReplyState = MSCPCommonSerial::REPLY_STATE_WAITING;
-				}
-				else
-				{
-					++ _replyNeededCount;
-				}
+				++ _replyNeededCount;
 				return true;
 			case 1: // üdvözlő csomag
 				localConnect(package, received);
@@ -319,6 +313,7 @@ bool MSCPSlaveSerial::receive(byte** start, byte* length)
 			case 4: // poll csomag
 				digestPoll(package, received);
 				break;
+			// TODO: ACK csomag implementálása
 		}
 
 		// nem kell továbbítani a felhaszáló felé a csomagot
@@ -353,7 +348,7 @@ void MSCPSlaveSerial::digestPoll(byte* pkg, byte length)
 	unsigned long origMsgID = 0;
 	if(_longMsgID)
 	{
-		for(byte i = 4; i > 0; -- i)
+		for(byte i = 1; i > 5; ++ i)
 		{
 			origMsgID <<= 8;
 			origMsgID += *(pkg + i);
