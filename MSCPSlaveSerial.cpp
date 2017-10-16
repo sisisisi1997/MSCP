@@ -15,6 +15,7 @@ MSCPSlaveSerial::MSCPSlaveSerial()
 	this->_hasCurrentPkg	= false;
 	this->_manualReplyState	= MSCPCommonSerial::REPLY_STATE_NO_ORIGINAL;
 	this->_replyNeededCount	= 0;
+	this->_hadConnection	= false;
 
 	pinMode(MSCPCommonSerial::LED_PIN, OUTPUT);
 }
@@ -25,6 +26,20 @@ MSCPSlaveSerial::MSCPSlaveSerial()
 MSCPSlaveSerial::~MSCPSlaveSerial()
 {
 	disposeCurrentPackage();
+	if(this->_hadConnection) // a válaszokhoz kapcsolódó tömböknek lett lefoglalva memória
+	{
+		free(_origIDs8);
+		free(_origIds32);
+		free(_replyStates);
+		free(_replyLengths);
+		for(uint8_t i = 0; i < _maxMessageCount; ++ i)
+		{
+			if(*(_isUsed + i)
+				free(*(_replyStarts + i));
+		}
+		free(_replyStarts);
+		free(_isUsed);
+	}
 	_hasBegun = false;
 }
 
@@ -164,7 +179,7 @@ void MSCPSlaveSerial::maintain(bool checkNewMsg)
  * length: ebben a kimeneti paraméterben lesz eltárolva az adatok hossza byte-ban.
  * visszatérés: true, ha van adat a két paraméterben; false, ha nincs
  */
-bool MSCPSlaveSerial::receive(byte** start, byte* length)
+bool MSCPSlaveSerial::receive(byte** start, byte* length, uint32_t* msgID)
 {
 	// ellenőrizzük, hogy érkezett-e újabb üzenet
 	if(Serial.available()) // több, mint 0 byte van a Serial bufferében
@@ -297,9 +312,30 @@ bool MSCPSlaveSerial::receive(byte** start, byte* length)
 			case 0: // standard csomag
 				*start	= package;
 				*length	= fullLength;
-				if(_manualReplyState == MSCPCommonSerial::REPLY_STATE_NO_ORIGINAL)
-					_manualReplyState = MSCPCommonSerial::REPLY_STATE_WAITING;
-				++ _replyNeededCount;
+				bool found;
+				uint8_t index = this->getFreeReplyIndex(&found);
+	
+				if(found)
+				{
+					*(_isUsed + index) = true;
+					if(_longMsgID)
+					{
+						uint32_t id = 0;
+						for(uint8_t i = 0; i < 4; ++ i)
+						{
+							id <<= 8;
+							id += *(package + i);
+						}
+						*(_origIds32 + index * sizeof(uint32_t)) = id;
+					}
+					else
+						*(_origIDs8 + index) = *(package);
+					*(_replyStates + index) = MSCPCommonSerial::REPLY_STATE_WAITING;
+				}
+				else
+				{
+					// ERROR!!! Nem fog tudni válaszolni erre a csomagra a user...
+				}
 				return true;
 			case 1: // üdvözlő csomag
 				localConnect(package, received);
@@ -334,8 +370,19 @@ void MSCPSlaveSerial::localConnect(byte* pkg, byte length)
 	++ currentIndex;
 
 	_longMsgID = ((*(pkg + currentIndex) % 2) == 1); // az utolsó bit
+	
+	// beállítjuk a beérkezett csomagokra való válaszok adatait tároló tömböket
+	_maxMessageCount = (_memoryBufferSize / _standardSize) > 255 ? 255 : (_memoryBufferSize / _standardSize);
+	if(_longMsgID)
+		_origIds32	= (uint32_t*)malloc(_maxMessageCount * sizeof(uint32_t));
+	else
+		_origIds8	= (uint8_t*)malloc(_maxMessageCount); // sizeof(uint8_t) = 1
+	_replyStates	= (uint8_t*)malloc(_maxMessageCount);
+	_replyLengths	= (uint8_t*)malloc(_maxMessageCount);
 
+	// már csatlakozva vagyunk
 	_connectionState = MSCPCommonSerial::CONN_STATE_CONNECTED;
+	_hadConnection = true;
 }
 
 // a csomagot a csomagazonosító byte nélkül kapja meg
@@ -345,7 +392,8 @@ void MSCPSlaveSerial::digestPoll(byte* pkg, byte length)
 	// [0]: slave node ID
 	// [1] vagy [1-4]: original Msg ID
 
-	unsigned long origMsgID = 0;
+	// Megállapítjuk, hogy milyen ID-jű üzenetre kellene válaszolnunk.
+	uint32_t origMsgID = 0;
 	if(_longMsgID)
 	{
 		for(byte i = 1; i > 5; ++ i)
@@ -357,10 +405,42 @@ void MSCPSlaveSerial::digestPoll(byte* pkg, byte length)
 	else
 		origMsgID = *(pkg + 1);
 	
-	// küldünk választ
-	if(_manualReplyState != MSCPCommonSerial::REPLY_STATE_NO_ORIGINAL && origMsgID == _manualReplyOriginalMsgID)
+	
+	uint8_t replyState = MSCPCommonSerial::REPLY_STATE_NO_ORIGINAL, replyLength;
+	uint8_t foundIndex = 0;
+	bool found = false;
+	for(uint8_t i = 0; i < _maxMessageCount; ++ i)
 	{
-		byte size = 2 + (_longMsgID ? 4 : 1) + 2 + _manualReplyLength;
+		if(*(_isUsed + i))
+		{
+			if(_longMsgID)
+			{
+				if(*(_origIds32 + i * sizeof(uint32_t)) == origMsgID)
+				{
+					replyNeeded = *(_replyStates + i);
+					foundIndex = i;
+					found = true;
+					break;
+				}
+			}
+			else
+			{
+				if(*(_origIDs8 + i) == origMsgID)
+				{
+					replyNeeded = *(_replyStates + i);
+					foundIndex = i;
+					found = true;
+					break;
+				}
+			}
+		}
+	}
+	if(found)
+		replyLength = *(_replyLengths + foundIndex)
+	
+	//if(_replyNeededCount != 0 && replyNeeded)
+	//{
+		byte size = 2 + (_longMsgID ? 4 : 1) + 2 + replyLength;
 		byte reply[_standardSize];
 		byte currentIndex = 0;
 		
@@ -372,23 +452,24 @@ void MSCPSlaveSerial::digestPoll(byte* pkg, byte length)
 			for(byte i = 0, max = 4; i < max; ++ i)
 			{
 				// helyiértékeket megőrizve byte-ra daraboljuk az ID-t
-				reply[currentIndex ++] = (_manualReplyOriginalMsgID >> (8 * (max - i - 1))) % 256;
+				// a végeredmény Big Endian
+				reply[currentIndex ++] = (*(_origIds32 + foundIndex * sizeof(uint32_t)) >> (8 * (max - i - 1))) % 256;
 			}
 		}
 		else // rövid üzenet ID beállítása
 		{
-			reply[currentIndex ++] = _manualReplyOriginalMsgID;
+			reply[currentIndex ++] = *(_origIDs8 + foundIndex);
 		}
-
-		reply[currentIndex ++] = _manualReplyState;
-		if(_manualReplyState == MSCPCommonSerial::REPLY_STATE_HASREPLY)
+		
+		reply[currentIndex ++] = replyState;
+		if(replyState == MSCPCommonSerial::REPLY_STATE_HASREPLY)
 		{
-			reply[currentIndex ++] = _manualReplyLength;
-			for(byte i = 0; i < _manualReplyLength; ++ i)
+			reply[currentIndex ++] = replyLength;
+			for(byte i = 0; i < replyLength; ++ i)
 			{
 				reply[currentIndex ++] = *(_manualReplyStart + i);
 			}
-			free(_manualReplyStart); // lemásoltuk, innentől nem kell
+			free(*(_replyStarts + foundIndex)); // lemásoltuk, innentől nem kell
 		}
 
 		while(currentIndex < _standardSize)
@@ -398,31 +479,39 @@ void MSCPSlaveSerial::digestPoll(byte* pkg, byte length)
 
 		Serial.write(reply, _standardSize); // a metódus végén a reply[] felszabadul automatikusan, mivel tömb
 
-		if(_replyNeededCount != 0)
+		/*if(_replyNeededCount != 0)
 		{
 			_manualReplyState = MSCPCommonSerial::REPLY_STATE_WAITING;
 		}
 		else
 		{
 			_manualReplyState = MSCPCommonSerial::REPLY_STATE_NO_ORIGINAL;
-		}
-	}
+		}*/
+	//}
 }
 
-bool MSCPSlaveSerial::manualReply(byte* start, byte length, unsigned long originalMsgID)
+bool MSCPSlaveSerial::manualReply(byte* start, byte length, uint32_t originalMsgID)
 {
-	if(_manualReplyState == MSCPCommonSerial::REPLY_STATE_WAITING)
+	bool found;
+	uint8_t index = this->getReplyIndex(originalMsgID, &found);
+	
+	if(!found)
+		return false;
+	
+	if(*(_replyStates + index) == MSCPCommonSerial::REPLY_STATE_WAITING)
 	{
-		_manualReplyStart = (byte*)malloc(length);
-		_manualReplyLength = length;
+		*(_replyStarts + index) = (byte*)malloc(length);
+		*(_replyLengths + index) = length;
 		for(byte i = 0; i < length; ++ i) // lemásoljuk a választ, hogy a függvény visszatérése után a hívó rögtön törölhesse
 		{
-			*(_manualReplyStart + i) = *(start + i);
+			*(*(_replyStarts + index) + i) = *(start + i);
 		}
 		
-		_manualReplyOriginalMsgID = originalMsgID;
-		_manualReplyState = MSCPCommonSerial::REPLY_STATE_HASREPLY;
-		-- _replyNeededCount;
+		if(_longMsgID)
+			*(_origIds32 + found * sizeof(uint32_t)) = originalMsgID;
+		else
+			*(_origIDs8 + found) = originalMsgID % 256;
+		*(_replyStates + index) = MSCPCommonSerial::REPLY_STATE_HASREPLY;
 		return true;
 	}
 	else
@@ -431,16 +520,61 @@ bool MSCPSlaveSerial::manualReply(byte* start, byte length, unsigned long origin
 	}
 }
 
-bool MSCPSlaveSerial::noManualReply()
+bool MSCPSlaveSerial::noManualReply(uint32_t msgID)
 {
-	if(_manualReplyState == MSCPCommonSerial::REPLY_STATE_WAITING)
+	bool found;
+	uint8_t index = this->getReplyIndex(msgID, &found);
+	if(!found)
+		return false;
+	
+	if(*(_replyStates + index) == MSCPCommonSerial::REPLY_STATE_WAITING)
 	{
-		-- _replyNeededCount;
-		_manualReplyState = MSCPCommonSerial::REPLY_STATE_NOREPLY;
+		*(_replyStates + index) = MSCPCommonSerial::REPLY_STATE_NOREPLY;
 		return true;
 	}
 	else
 	{
 		return false;
 	}
+}
+
+uint8_t MSCPSlaveSerial::getReplyIndex(uint32_t msgID, bool* found)
+{
+	for(uint8_t i = 0; i < _maxMessageCount; ++ i)
+	{
+		if(*(_isUsed + i))
+		{
+			if(_longMsgID)
+			{
+				if(*(_origIds32 + i * sizeof(uint32_t)) == origMsgID)
+				{
+					*found = true;
+					return i;
+				}
+			}
+			else
+			{
+				if(*(_origIDs8 + i) == origMsgID)
+				{
+					*found = true;
+					return i;
+				}
+			}
+		}
+	}
+	return 0;
+}
+
+uint8_t MSCPSlaveSerial::getFreeReplyIndex(bool* found)
+{
+	for(uint8_t i = 0; i < _maxMessageCount; ++ i)
+	{
+		if(!*(_isUsed + i))
+		{
+			*found = true;
+			return i;
+		}
+	}
+	*found = false;
+	return false;
 }
