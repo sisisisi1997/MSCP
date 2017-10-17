@@ -17,7 +17,7 @@ class MSCPSlaveSerial
 		bool			packageAvailable();
 		bool			packageAvailable(byte**, byte*);
 		bool			manualReply(byte* start, byte length, uint32_t originalMsgID);
-		bool			noManualReply();
+		bool			noManualReply(uint32_t msgID);
 	private:
 		// példány specifikus
 		bool			_hasBegun;
@@ -40,7 +40,7 @@ class MSCPSlaveSerial
 		uint8_t*		_origIDs8;			// ez a tömb tárolja el a kapott üzenetek ID-ját ha nincs long message ID
 		uint32_t*		_origIDs32;			// ez a tömb tárolja el a kapott üzenetek ID-ját ha van long message ID
 		uint8_t*		_replyLengths;		// ez a tömb tárolja a válaszok hosszait
-		uint32_t**		_replyStarts;
+		uint8_t**		_replyStarts;
 		uint8_t*		_replyStates;		// ez a tömb tárolja el a kapott üzenetek állapotát
 		bool*			_isUsed;
 
